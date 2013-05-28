@@ -16,19 +16,49 @@ module Resque
       alias_method :perform_without_multi_job_forks, :perform
       alias_method :perform, :perform_with_multi_job_forks
 
-      def shutdown_with_multi_job_forks
-        release_fork if fork_hijacked? && fork_job_limit_reached?
-        shutdown_without_multi_job_forks
+      def shutdown_with_multi_job_forks?
+        release_fork if fork_hijacked? && (fork_job_limit_reached? || @shutdown)
+        shutdown_without_multi_job_forks?
       end
-      alias_method :shutdown_without_multi_job_forks, :shutdown?
-      alias_method :shutdown?, :shutdown_with_multi_job_forks
+      alias_method :shutdown_without_multi_job_forks?, :shutdown?
+      alias_method :shutdown?, :shutdown_with_multi_job_forks?
+
+      def shutdown_with_multi_job_forks
+        shutdown_without_multi_job_forks
+        shutdown_child if is_parent_process?
+      end
+      alias_method :shutdown_without_multi_job_forks, :shutdown
+      alias_method :shutdown, :shutdown_with_multi_job_forks
+
+      def pause_processing_with_multi_job_forks
+        pause_processing_without_multi_job_forks
+        shutdown_child if is_parent_process?
+      end
+      alias_method :pause_processing_without_multi_job_forks, :pause_processing
+      alias_method :pause_processing, :pause_processing_with_multi_job_forks
 
       def working_on_with_worker_registration(job)
         register_worker
         working_on_without_worker_registration(job)
       end
       alias_method :working_on_without_worker_registration, :working_on
-      alias_method :working_on, :working_on_with_worker_registration    
+      alias_method :working_on, :working_on_with_worker_registration
+    end
+
+    # Need to tell the child to shutdown since it might be looping performing multiple jobs per fork
+    # The QUIT signal is registered only in forked processes and calls this function
+    # The original commit at https://github.com/stulentsev/resque-multi-job-forks/commit/502f97a3fd54dec09500d5c2110b9857ef428c25
+    # uses TSTP, which hard-kills the fork.
+    def shutdown_child
+      begin
+        Process.kill('QUIT', @child)
+      rescue Errno::ESRCH # No such process
+        nil
+      end
+    end
+
+    def is_parent_process?
+      @child
     end
 
     def fork_hijacked?
@@ -42,6 +72,7 @@ module Resque
       @release_fork_limit = fork_job_limit
       @jobs_processed = 0
       @cant_fork = true
+      trap('QUIT') { shutdown }
     end
 
     def release_fork
